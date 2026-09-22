@@ -28,34 +28,6 @@ pub struct Yubikey {
 }
 
 impl ChallengeResponseKey {
-    pub(crate) fn perform_challenge(&self, challenge: &[u8]) -> Result<KeyElement, ChallengeResponseKeyError> {
-        match self {
-            ChallengeResponseKey::LocalChallenge(secret) => {
-                let secret_bytes = hex::decode(secret)?;
-                let response = crate::crypt::calculate_hmac_sha1(&[challenge], &secret_bytes)?.to_vec();
-                Ok(response)
-            }
-            ChallengeResponseKey::YubikeyChallenge(yubikey, slot_number) => {
-                let mut challenge_response_client = ChallengeResponse::new()?;
-                let slot = Slot::from_str(slot_number)
-                    .ok_or(ChallengeResponseKeyError::InvalidSlot(slot_number.to_string()))?;
-
-                let device = challenge_response_client.find_device_from_serial(yubikey.serial_number)?;
-
-                let mut config = Config::new_from(device);
-                config = config.set_variable_size(true);
-                config = config.set_mode(Mode::Sha1);
-                config = config.set_slot(slot);
-
-                let key_element = challenge_response_client
-                    .challenge_response_hmac(challenge, config)?
-                    .to_vec();
-
-                Ok(key_element)
-            }
-        }
-    }
-
     /// Retrieves a list of all available Yubikey devices connected to the system.
     pub fn get_available_yubikeys() -> Result<Vec<Yubikey>, ChallengeResponseKeyError> {
         let mut challenge_response_client = ChallengeResponse::new()?;
@@ -104,6 +76,102 @@ impl ChallengeResponseKey {
 
             #[allow(clippy::indexing_slicing)] // Safe because we check that the list is not empty above
             Ok(devices[0].clone())
+        }
+    }
+}
+
+/// Extension point for the challenge-response step of database authentication.
+///
+/// Implement this trait to wrap the challenge-response operation of
+/// [`ChallengeResponseKey`] with custom behavior, such as showing a UI prompt before the
+/// challenge is sent to the user's device, logging the interaction, or providing a
+/// completely custom challenge-response mechanism.
+///
+/// Pass an implementation to [`DatabaseKey::with_challenge_response_key`]. Implementors must
+/// implement [`Clone`] (or [`ChallengeResponseProviderClone`] directly) so that keys can be
+/// cloned internally.
+///
+/// [`ChallengeResponseKey`]: ChallengeResponseKey
+/// [`DatabaseKey::with_challenge_response_key`]: crate::DatabaseKey
+///
+/// # Examples
+///
+/// ```
+/// use keepass::{
+///     error::ChallengeResponseKeyError, ChallengeResponseKey, ChallengeResponseProvider, KeyElement,
+/// };
+///
+/// #[derive(Clone)]
+/// struct PromptedKey {
+///     inner: ChallengeResponseKey,
+/// }
+///
+/// impl ChallengeResponseProvider for PromptedKey {
+///     fn perform_challenge(
+///         &self,
+///         challenge: &[u8],
+///     ) -> Result<KeyElement, ChallengeResponseKeyError> {
+///         eprintln!("Please present your challenge-response key now");
+///         self.inner.perform_challenge(challenge)
+///     }
+/// }
+/// ```
+pub trait ChallengeResponseProvider: ChallengeResponseProviderClone {
+    /// Performs the challenge-response operation and returns the response bytes.
+    ///
+    /// The `challenge` is the KDF seed extracted from the database header.
+    fn perform_challenge(&self, challenge: &[u8]) -> Result<KeyElement, ChallengeResponseKeyError>;
+}
+
+/// Helper trait for cloning boxed [`ChallengeResponseProvider`]s.
+///
+/// This trait is blanket-implemented for all [`Clone`] providers and exists so that
+/// [`DatabaseKey`] can remain clonable while storing the provider as a trait object.
+///
+/// [`DatabaseKey`]: crate::DatabaseKey
+pub trait ChallengeResponseProviderClone {
+    /// Returns a boxed clone of this provider.
+    fn clone_box(&self) -> Box<dyn ChallengeResponseProvider>;
+}
+
+impl<T: ChallengeResponseProvider + Clone + 'static> ChallengeResponseProviderClone for T {
+    fn clone_box(&self) -> Box<dyn ChallengeResponseProvider> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn ChallengeResponseProvider> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+impl ChallengeResponseProvider for ChallengeResponseKey {
+    fn perform_challenge(&self, challenge: &[u8]) -> Result<KeyElement, ChallengeResponseKeyError> {
+        match self {
+            ChallengeResponseKey::LocalChallenge(secret) => {
+                let secret_bytes = hex::decode(secret)?;
+                let response = crate::crypt::calculate_hmac_sha1(&[challenge], &secret_bytes)?.to_vec();
+                Ok(response)
+            }
+            ChallengeResponseKey::YubikeyChallenge(yubikey, slot_number) => {
+                let mut challenge_response_client = ChallengeResponse::new()?;
+                let slot = Slot::from_str(slot_number)
+                    .ok_or(ChallengeResponseKeyError::InvalidSlot(slot_number.to_string()))?;
+
+                let device = challenge_response_client.find_device_from_serial(yubikey.serial_number)?;
+
+                let mut config = Config::new_from(device);
+                config = config.set_variable_size(true);
+                config = config.set_mode(Mode::Sha1);
+                config = config.set_slot(slot);
+
+                let key_element = challenge_response_client
+                    .challenge_response_hmac(challenge, config)?
+                    .to_vec();
+
+                Ok(key_element)
+            }
         }
     }
 }

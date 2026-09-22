@@ -7,6 +7,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::crypt::calculate_sha256;
 
+/// A single key element, i.e. the raw bytes of a key component
 pub type KeyElement = Vec<u8>;
 pub type KeyElements = Vec<KeyElement>;
 
@@ -14,7 +15,9 @@ pub type KeyElements = Vec<KeyElement>;
 mod yubikey;
 
 #[cfg(feature = "challenge_response")]
-pub use yubikey::{ChallengeResponseKey, ChallengeResponseKeyError};
+pub use yubikey::{
+    ChallengeResponseKey, ChallengeResponseKeyError, ChallengeResponseProvider, ChallengeResponseProviderClone,
+};
 
 fn parse_xml_keyfile(xml: &[u8]) -> Result<KeyElement, ParseXmlKeyFileError> {
     let mut tag_stack = Vec::new();
@@ -129,15 +132,54 @@ fn parse_keyfile(buffer: &[u8]) -> Result<KeyElement, DatabaseKeyError> {
 }
 
 /// A KeePass key, which might consist of a password and/or a keyfile
-#[derive(Debug, Clone, Default, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Default)]
 pub struct DatabaseKey {
     password: Option<String>,
     keyfile: Option<Vec<u8>>,
     #[cfg(feature = "challenge_response")]
-    challenge_response_key: Option<ChallengeResponseKey>,
+    challenge_response_key: Option<Box<dyn ChallengeResponseProvider>>,
     #[cfg(feature = "challenge_response")]
     challenge_response_result: Option<KeyElement>,
 }
+
+impl std::fmt::Debug for DatabaseKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("DatabaseKey");
+        debug
+            .field("password", &self.password)
+            .field("keyfile", &self.keyfile);
+        #[cfg(feature = "challenge_response")]
+        {
+            debug
+                .field(
+                    "challenge_response_key",
+                    &self
+                        .challenge_response_key
+                        .as_ref()
+                        .map(|_| "<challenge-response key>"),
+                )
+                .field("challenge_response_result", &self.challenge_response_result);
+        }
+        debug.finish()
+    }
+}
+
+impl Zeroize for DatabaseKey {
+    fn zeroize(&mut self) {
+        self.password.zeroize();
+        self.keyfile.zeroize();
+        #[cfg(feature = "challenge_response")]
+        self.challenge_response_result.zeroize();
+    }
+}
+
+impl Drop for DatabaseKey {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for DatabaseKey {}
 
 impl DatabaseKey {
     /// Modify the database key to include a password
@@ -157,9 +199,9 @@ impl DatabaseKey {
     /// a prompt
     #[cfg(all(feature = "challenge_response", feature = "utilities"))]
     pub fn with_hmac_sha1_secret_from_prompt(mut self, prompt_message: &str) -> Result<Self, std::io::Error> {
-        self.challenge_response_key = Some(ChallengeResponseKey::LocalChallenge(rpassword::prompt_password(
-            prompt_message,
-        )?));
+        self.challenge_response_key = Some(Box::new(ChallengeResponseKey::LocalChallenge(
+            rpassword::prompt_password(prompt_message)?,
+        )));
         Ok(self)
     }
 
@@ -179,8 +221,11 @@ impl DatabaseKey {
 
     /// Modify the database key to include a challenge-response key
     #[cfg(feature = "challenge_response")]
-    pub fn with_challenge_response_key(mut self, challenge_response_key: ChallengeResponseKey) -> Self {
-        self.challenge_response_key = Some(challenge_response_key);
+    pub fn with_challenge_response_key(
+        mut self,
+        challenge_response_key: impl ChallengeResponseProvider + 'static,
+    ) -> Self {
+        self.challenge_response_key = Some(Box::new(challenge_response_key));
         self
     }
 
@@ -348,6 +393,65 @@ mod key_tests {
         }
         .get_key_elements()
         .is_err());
+
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "challenge_response"))]
+mod challenge_response_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use super::{DatabaseKey, DatabaseKeyError, KeyElement};
+    use crate::key::{ChallengeResponseKey, ChallengeResponseKeyError, ChallengeResponseProvider};
+
+    #[derive(Clone)]
+    struct CountingKey {
+        inner: ChallengeResponseKey,
+        counter: Rc<Cell<usize>>,
+    }
+
+    impl ChallengeResponseProvider for CountingKey {
+        fn perform_challenge(&self, challenge: &[u8]) -> Result<KeyElement, ChallengeResponseKeyError> {
+            self.counter.set(self.counter.get() + 1);
+            self.inner.perform_challenge(challenge)
+        }
+    }
+
+    fn counting_key(counter: Rc<Cell<usize>>) -> CountingKey {
+        CountingKey {
+            inner: ChallengeResponseKey::LocalChallenge("0123456789ABCDEF0123456789ABCDEF".to_string()),
+            counter,
+        }
+    }
+
+    #[test]
+    fn test_custom_provider() -> Result<(), DatabaseKeyError> {
+        let counter = Rc::new(Cell::new(0));
+        let key = DatabaseKey::new()
+            .with_password("asdf")
+            .with_challenge_response_key(counting_key(Rc::clone(&counter)));
+
+        assert_eq!(counter.get(), 0);
+        let performed = key.perform_challenge(&[0u8; 32])?;
+        assert_eq!(counter.get(), 1);
+        assert_eq!(performed.get_key_elements()?.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_clone_boxed_provider() -> Result<(), DatabaseKeyError> {
+        let counter = Rc::new(Cell::new(0));
+        let key = DatabaseKey::new()
+            .with_password("asdf")
+            .with_challenge_response_key(counting_key(Rc::clone(&counter)));
+
+        let clone = key.clone();
+        drop(key);
+        let performed = clone.perform_challenge(&[0u8; 32])?;
+        assert_eq!(counter.get(), 1);
+        assert_eq!(performed.get_key_elements()?.len(), 2);
 
         Ok(())
     }

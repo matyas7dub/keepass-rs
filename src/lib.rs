@@ -13,5 +13,5 @@ mod key;
 pub use self::db::Database;
 
 #[cfg(feature = "challenge_response")]
-pub use self::key::ChallengeResponseKey;
-pub use self::key::DatabaseKey;
+pub use self::key::{ChallengeResponseKey, ChallengeResponseProvider, ChallengeResponseProviderClone};
+pub use self::key::{DatabaseKey, KeyElement};
