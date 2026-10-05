@@ -18,18 +18,36 @@ impl Database {
         let mut data = Vec::new();
         source.read_to_end(&mut data)?;
 
-        Database::parse(data.as_ref(), key)
+        Database::parse(data.as_ref(), key, None)
+    }
+
+    /// Parse a database from a std::io::Read and run a callback function when
+    /// the challenge response is completed
+    #[cfg(feature = "challenge_response")]
+    pub fn open_with_callback(
+        source: &mut dyn std::io::Read,
+        key: DatabaseKey,
+        callback: Box<dyn Fn()>,
+    ) -> Result<Database, DatabaseOpenError> {
+        let mut data = Vec::new();
+        source.read_to_end(&mut data)?;
+
+        Database::parse(data.as_ref(), key, Some(callback))
     }
 
     /// Parse a database from a byte slice
-    pub fn parse(data: &[u8], key: DatabaseKey) -> Result<Database, DatabaseOpenError> {
+    pub fn parse(
+        data: &[u8],
+        key: DatabaseKey,
+        callback: Option<Box<dyn Fn()>>,
+    ) -> Result<Database, DatabaseOpenError> {
         let database_version = DatabaseVersion::parse(data)?;
 
         match database_version {
             DatabaseVersion::KDB(_) => parse_kdb(data, &key),
             DatabaseVersion::KDB2(_) => Err(DatabaseOpenError::UnsupportedVersion),
             DatabaseVersion::KDB3(_) => parse_kdbx3(data, &key),
-            DatabaseVersion::KDB4(_) => parse_kdbx4(data, &key),
+            DatabaseVersion::KDB4(_) => parse_kdbx4(data, &key, callback),
         }
     }
 
@@ -44,7 +62,7 @@ impl Database {
             DatabaseVersion::KDB(_) => return Err(DatabaseOpenError::UnsupportedVersion),
             DatabaseVersion::KDB2(_) => return Err(DatabaseOpenError::UnsupportedVersion),
             DatabaseVersion::KDB3(_) => decrypt_kdbx3(data.as_ref(), &key)?.2,
-            DatabaseVersion::KDB4(_) => decrypt_kdbx4(data.as_ref(), &key)?.3,
+            DatabaseVersion::KDB4(_) => decrypt_kdbx4(data.as_ref(), &key, None)?.3,
         };
 
         Ok(data)

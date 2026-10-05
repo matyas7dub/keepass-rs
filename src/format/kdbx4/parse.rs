@@ -26,8 +26,12 @@ use crate::{
 use super::KDBX4InnerHeader;
 
 /// Open, decrypt and parse a KeePass database from a source and key elements
-pub(crate) fn parse_kdbx4(data: &[u8], db_key: &DatabaseKey) -> Result<Database, DatabaseOpenError> {
-    let (config, header_attachments, mut inner_decryptor, xml) = decrypt_kdbx4(data, db_key)?;
+pub(crate) fn parse_kdbx4(
+    data: &[u8],
+    db_key: &DatabaseKey,
+    callback: Option<Box<dyn Fn()>>,
+) -> Result<Database, DatabaseOpenError> {
+    let (config, header_attachments, mut inner_decryptor, xml) = decrypt_kdbx4(data, db_key, callback)?;
 
     let mut db = crate::format::xml_db::parse_xml(&xml, &header_attachments, &mut *inner_decryptor)
         .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx4(Kdbx4OpenError::Xml(e))))?;
@@ -42,6 +46,7 @@ pub(crate) fn parse_kdbx4(data: &[u8], db_key: &DatabaseKey) -> Result<Database,
 pub(crate) fn decrypt_kdbx4(
     data: &[u8],
     db_key: &DatabaseKey,
+    _callback: Option<Box<dyn Fn()>>,
 ) -> Result<(DatabaseConfig, Vec<Value<Vec<u8>>>, Box<dyn Cipher>, Vec<u8>), DatabaseOpenError> {
     let version = DatabaseVersion::parse(data)?;
 
@@ -77,7 +82,13 @@ pub(crate) fn decrypt_kdbx4(
     }
 
     #[cfg(feature = "challenge_response")]
-    let db_key = db_key.clone().perform_challenge(&outer_header.kdf_seed)?;
+    let db_key = {
+        let temp = db_key.clone().perform_challenge(&outer_header.kdf_seed)?;
+        if let Some(callback) = _callback {
+            callback();
+        }
+        temp
+    };
 
     // derive master key from composite key, transform_seed, transform_rounds and master_seed
     let key_elements = db_key.get_key_elements()?;

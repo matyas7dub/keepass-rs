@@ -424,6 +424,27 @@ mod file_read_tests {
     }
 
     #[test]
+    #[cfg(feature = "challenge_response")]
+    fn open_kdbx4_with_callback() -> Result<(), DatabaseOpenError> {
+        let path = Path::new("tests/resources/test_db_kdbx4_with_password_argon2id.kdbx");
+
+        let (mut tx, rx) = std::sync::mpsc::channel::<()>();
+        let db = Database::open_with_callback(
+            &mut File::open(path)?,
+            DatabaseKey::new().with_password("demopass"),
+            Box::new(move || {
+                tx.send(());
+            }),
+        )?;
+
+        assert_eq!(db.root().name, "Root");
+        assert_eq!(db.root().groups().count(), 0);
+        assert_eq!(db.root().entries().count(), 2);
+        assert!(rx.try_recv().is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn open_kdbx41_with_password() -> Result<(), DatabaseOpenError> {
         let path = Path::new("tests/resources/test_db_kdbx41_with_password_aes.kdbx");
         let db = Database::open(
@@ -509,7 +530,7 @@ mod file_read_tests {
         for one_len in 0..=file_len {
             print!("Trying length: {}", one_len);
             let current_slice = &file_as_vec[..one_len];
-            let res = Database::parse(current_slice, DatabaseKey::new().with_password("demopass"));
+            let res = Database::parse(current_slice, DatabaseKey::new().with_password("demopass"), None);
             match res {
                 Ok(db) => {
                     println!(" - DB Opened");
